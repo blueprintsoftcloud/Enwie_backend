@@ -1,7 +1,7 @@
 import { Request, Response } from "express";
 import crypto from "crypto";
 import mongoose from "mongoose";
-import { User, Order, Cart, Product, PaymentLog, StaffProfile, Role, OrderStatus, NotificationType, Address } from "../models/mongoose";
+import { User, Order, Cart, Product, PaymentLog, StaffProfile, Role, OrderStatus, NotificationType, Address, OrderItem } from "../models/mongoose";
 import razorpay from "../config/razorpay";
 import { calculateShippingWithConfig } from "../services/shipping.service";
 import { env } from "../config/env";
@@ -2074,6 +2074,116 @@ export const checkCustomerExists = async (req: Request, res: Response) => {
   }
 };
 
+// GET /api/orders/admin-order/check-recent-order?customerId=&phone=&email=  (admin / super-admin)
+// Checks if a customer has placed an order in the last 24 hours.
+export const checkRecentOrderForCustomer = async (req: Request, res: Response) => {
+  try {
+    const customerId = (req.query.customerId as string | undefined)?.trim();
+    const phone = (req.query.phone as string | undefined)?.trim();
+    const email = (req.query.email as string | undefined)?.trim().toLowerCase();
+
+    let targetUserId: string | null = null;
+    let customerName: string = "";
+
+    if (customerId) {
+      const user = await User.findById(customerId).select("id username").lean();
+      if (user) {
+        targetUserId = String((user as any)._id || (user as any).id);
+        customerName = (user as any).username;
+      }
+    } else if (phone || email) {
+      const conditions: any[] = [];
+      if (phone) conditions.push({ phone });
+      if (email) conditions.push({ email });
+
+      const user = await User.findOne({
+        role: "CUSTOMER",
+        $or: conditions,
+      }).select("id username").lean();
+
+      if (user) {
+        targetUserId = String((user as any)._id || (user as any).id);
+        customerName = (user as any).username;
+      }
+    }
+
+    if (!targetUserId) {
+      return res.json({ hasRecentOrder: false, order: null });
+    }
+
+    const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const userObjectId = mongoose.Types.ObjectId.isValid(targetUserId)
+      ? new mongoose.Types.ObjectId(targetUserId)
+      : targetUserId;
+
+    const recentOrder = await Order.findOne({
+      userId: { $in: [userObjectId, String(targetUserId)] },
+      createdAt: { $gte: twentyFourHoursAgo },
+      orderStatus: { $ne: "CANCELLED" },
+    })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    if (!recentOrder) {
+      return res.json({ hasRecentOrder: false, order: null });
+    }
+
+    const recentOrderId = String((recentOrder as any)._id || (recentOrder as any).id);
+
+    const recentItems = await OrderItem.find({ orderId: (recentOrder as any)._id })
+      .populate<{ productId: { name: string } }>("productId", "name")
+      .lean();
+
+    const itemsSummary = recentItems
+      .map((i: any) => `${i.productId?.name || "Item"} (x${i.quantity})`)
+      .join(", ") || `${recentItems.length || 1} item(s)`;
+
+    const orderDate = new Date(recentOrder.createdAt);
+    const formattedTime = orderDate.toLocaleString("en-IN", {
+      timeZone: "Asia/Kolkata",
+      day: "2-digit",
+      month: "short",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: true,
+    });
+
+    const diffMs = Math.max(0, Date.now() - orderDate.getTime());
+    const diffMins = Math.floor(diffMs / 60000);
+    const hours = Math.floor(diffMins / 60);
+    const mins = diffMins % 60;
+    let relativeTime = "Just now";
+    if (hours > 0) {
+      relativeTime = `${hours} hr${hours > 1 ? "s" : ""}${mins > 0 ? ` ${mins} min${mins > 1 ? "s" : ""}` : ""} ago`;
+    } else if (diffMins > 0) {
+      relativeTime = `${diffMins} min${diffMins > 1 ? "s" : ""} ago`;
+    }
+
+    return res.json({
+      hasRecentOrder: true,
+      order: {
+        id: recentOrderId,
+        shortId: recentOrderId.slice(-6).toUpperCase(),
+        createdAt: recentOrder.createdAt,
+        formattedTime,
+        relativeTime,
+        finalAmount: recentOrder.finalAmount,
+        totalAmount: recentOrder.totalAmount,
+        orderStatus: recentOrder.orderStatus,
+        paymentMethod: recentOrder.paymentMethod,
+        placedByAdmin: !!(recentOrder as any).placedByAdminId,
+        itemsCount: recentItems.length,
+        itemsSummary,
+        customerName: customerName || ((recentOrder as any).shippingAddress?.fullName || "Customer"),
+      },
+    });
+  } catch (err: any) {
+    logger.error("checkRecentOrderForCustomer error", err);
+    res.status(500).json({ message: "Failed to check recent order" });
+  }
+};
+
 // GET /api/orders/admin-order/products?search=&page=1  (admin / super-admin)
 // Returns active products with stock info for product picker.
 export const getProductsForAdminOrder = async (req: Request, res: Response) => {
@@ -2151,6 +2261,7 @@ export const placeAdminOrder = async (req: Request, res: Response) => {
       paymentMethod = "CASH",
       paymentNote,
       couponId,
+      bypassRecentOrderWarning,
     } = req.body as {
       customerId?: string;
       newCustomer?: { username: string; phone: string; email?: string };
@@ -2159,6 +2270,7 @@ export const placeAdminOrder = async (req: Request, res: Response) => {
       paymentMethod: "CASH" | "POD";
       paymentNote?: string;
       couponId?: string;
+      bypassRecentOrderWarning?: boolean;
     };
 
     // ── 1. Resolve customer ──────────────────────────────────────────────────
@@ -2252,6 +2364,75 @@ export const placeAdminOrder = async (req: Request, res: Response) => {
       customer = created;
     } else {
       return res.status(400).json({ message: "Provide either customerId or newCustomer details" });
+    }
+
+    // ── 1b. Check if customer already placed an order in the last 24 hours ────
+    if (!bypassRecentOrderWarning) {
+      const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      const userObjectId = mongoose.Types.ObjectId.isValid(customer.id)
+        ? new mongoose.Types.ObjectId(customer.id)
+        : customer.id;
+
+      const recentOrder = await Order.findOne({
+        userId: { $in: [userObjectId, String(customer.id)] },
+        createdAt: { $gte: twentyFourHoursAgo },
+        orderStatus: { $ne: "CANCELLED" },
+      })
+        .sort({ createdAt: -1 })
+        .lean();
+
+      if (recentOrder) {
+        const recentOrderId = String((recentOrder as any)._id || (recentOrder as any).id);
+        const recentItems = await OrderItem.find({ orderId: (recentOrder as any)._id })
+          .populate<{ productId: { name: string } }>("productId", "name")
+          .lean();
+
+        const itemsSummary = recentItems
+          .map((i: any) => `${i.productId?.name || "Item"} (x${i.quantity})`)
+          .join(", ") || `${recentItems.length || 1} item(s)`;
+
+        const orderDate = new Date(recentOrder.createdAt);
+        const formattedTime = orderDate.toLocaleString("en-IN", {
+          timeZone: "Asia/Kolkata",
+          day: "2-digit",
+          month: "short",
+          year: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: true,
+        });
+
+        const diffMs = Math.max(0, Date.now() - orderDate.getTime());
+        const diffMins = Math.floor(diffMs / 60000);
+        const hours = Math.floor(diffMins / 60);
+        const mins = diffMins % 60;
+        let relativeTime = "Just now";
+        if (hours > 0) {
+          relativeTime = `${hours} hr${hours > 1 ? "s" : ""}${mins > 0 ? ` ${mins} min${mins > 1 ? "s" : ""}` : ""} ago`;
+        } else if (diffMins > 0) {
+          relativeTime = `${diffMins} min${diffMins > 1 ? "s" : ""} ago`;
+        }
+
+        return res.status(409).json({
+          code: "RECENT_ORDER_EXISTS_24H",
+          message: "This customer has already placed an order in the last 24 hours.",
+          recentOrder: {
+            id: recentOrderId,
+            shortId: recentOrderId.slice(-6).toUpperCase(),
+            createdAt: recentOrder.createdAt,
+            formattedTime,
+            relativeTime,
+            finalAmount: recentOrder.finalAmount,
+            totalAmount: recentOrder.totalAmount,
+            orderStatus: recentOrder.orderStatus,
+            paymentMethod: recentOrder.paymentMethod,
+            placedByAdmin: !!(recentOrder as any).placedByAdminId,
+            itemsCount: recentItems.length,
+            itemsSummary,
+            customerName: customer.username,
+          },
+        });
+      }
     }
 
     // ── 2. Validate + price items ────────────────────────────────────────────

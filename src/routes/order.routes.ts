@@ -16,6 +16,7 @@ import {
   getCustomerTransactions,
   searchCustomersForOrder,
   checkCustomerExists,
+  checkRecentOrderForCustomer,
   getProductsForAdminOrder,
   placeAdminOrder,
   getBulkInvoices,
@@ -63,6 +64,7 @@ router.patch("/:id/refund", authMiddleware, adminOrStaff("ORDER_UPDATE"), refund
 // Admin Order (place on behalf of customer)
 router.get("/admin-order/search-customers", authMiddleware, adminOrSuperAdmin, searchCustomersForOrder);
 router.get("/admin-order/check-customer", authMiddleware, adminOrSuperAdmin, checkCustomerExists);
+router.get("/admin-order/check-recent-order", authMiddleware, adminOrSuperAdmin, checkRecentOrderForCustomer);
 router.get("/admin-order/products", authMiddleware, adminOrSuperAdmin, getProductsForAdminOrder);
 router.post("/admin-order/place", authMiddleware, adminOrSuperAdmin, placeAdminOrder);
 router.get("/admin-order/lookup-pincode/:pincode", authMiddleware, adminOrSuperAdmin, lookupPincode);
