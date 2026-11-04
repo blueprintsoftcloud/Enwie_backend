@@ -16,6 +16,9 @@ export const productAddSchema = z.object({
   brand: z.string().max(100, "Brand too long").trim().optional(),
   // Optional per-product SEO overrides — fall back to name/description on the frontend
   // when unset, so filling these in is never required.
+  materialCare: z.string().max(2000, "Material & Care text too long").trim().optional(),
+  customSections: z.any().optional(),
+  specifications: z.any().optional(),
   metaTitle: z.string().max(70, "Meta title too long").trim().optional(),
   metaDescription: z.string().max(160, "Meta description too long").trim().optional(),
   purchasePrice: z
@@ -54,6 +57,9 @@ export const productUpdateSchema = z.object({
   name: z.string().min(1).max(200).trim().optional(),
   description: z.string().max(50000, "Description too long").trim().optional(),
   brand: z.string().max(100).trim().optional(),
+  materialCare: z.string().max(2000, "Material & Care text too long").trim().optional(),
+  customSections: z.any().optional(),
+  specifications: z.any().optional(),
   metaTitle: z.string().max(70, "Meta title too long").trim().optional(),
   metaDescription: z.string().max(160, "Meta description too long").trim().optional(),
   purchasePrice: z
