@@ -7,6 +7,7 @@ export const productAddSchema = z.object({
     .min(1, "Code cannot be empty")
     .max(50, "Code too long")
     .trim(),
+  barcode: z.string().max(100).trim().optional(),
   name: z
     .string({ required_error: "Product name is required" })
     .min(1, "Name cannot be empty")
@@ -54,6 +55,7 @@ export const productAddSchema = z.object({
 
 export const productUpdateSchema = z.object({
   code: z.string().min(1).max(50).trim().optional(),
+  barcode: z.string().max(100).trim().optional(),
   name: z.string().min(1).max(200).trim().optional(),
   description: z.string().max(50000, "Description too long").trim().optional(),
   brand: z.string().max(100).trim().optional(),

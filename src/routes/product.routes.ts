@@ -8,6 +8,8 @@ import {
   adminStockSummary,
   productAdminDetail,
   quickStockUpdate,
+  regenerateProductBarcode,
+  getProductByBarcode,
 } from "../controllers/product.controller";
 import {
   listVariants,
@@ -34,6 +36,8 @@ router.get("/detail/:id", authMiddleware, adminOrStaff("PRODUCT_VIEW"), productA
 router.patch("/:id/quick-stock", authMiddleware, adminOrStaff("PRODUCT_EDIT"), quickStockUpdate);
 
 router.get("/list", authMiddleware, adminOrStaff("PRODUCT_VIEW"), productList);
+router.get("/barcode/:barcode", authMiddleware, adminOrStaff(["PRODUCT_VIEW", "ORDER_CREATE"]), getProductByBarcode);
+router.post("/:id/regenerate-barcode", authMiddleware, adminOrStaff("PRODUCT_EDIT"), regenerateProductBarcode);
 router.post(
   "/add",
   authMiddleware,

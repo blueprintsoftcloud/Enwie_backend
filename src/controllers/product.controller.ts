@@ -134,10 +134,25 @@ export const productList = async (req: Request, res: Response) => {
   }
 };
 
+export const generateUniqueBarcode = async (): Promise<string> => {
+  let barcode = "";
+  let exists = true;
+  let attempts = 0;
+  while (exists && attempts < 20) {
+    attempts++;
+    const randomNum = Math.floor(10000000 + Math.random() * 90000000);
+    barcode = `ENW${randomNum}`;
+    const found = await Product.findOne({ barcode });
+    if (!found) exists = false;
+  }
+  return barcode;
+};
+
 // POST /api/products/add  (admin)
 export const productAdd = async (req: Request, res: Response) => {
   try {
     const { code, name, description, price, purchasePrice, category, stock, discount, brand, metaTitle, metaDescription, materialCare } = req.body;
+    const userBarcode = req.body.barcode ? String(req.body.barcode).trim() : undefined;
     const sizesRaw = req.body.sizes;
     const sizes: string[] = Array.isArray(sizesRaw) ? sizesRaw : (sizesRaw ? [sizesRaw] : []);
 
@@ -155,6 +170,16 @@ export const productAdd = async (req: Request, res: Response) => {
         .status(400)
         .json({ message: "A product with this code already exists" });
     }
+
+    if (userBarcode) {
+      const dupeBarcode = await Product.findOne({ barcode: userBarcode });
+      if (dupeBarcode) {
+        return res
+          .status(400)
+          .json({ message: "A product with this barcode already exists" });
+      }
+    }
+    const assignedBarcode = userBarcode || (await generateUniqueBarcode());
 
     // Verify category exists
     const cat = await prisma.category.findUnique({ where: { id: category } });
@@ -185,6 +210,7 @@ export const productAdd = async (req: Request, res: Response) => {
     const product = await prisma.product.create({
       data: {
         code,
+        barcode: assignedBarcode,
         name,
         description: sanitizeRichText(description) ?? null,
         brand: brand ?? null,
@@ -332,6 +358,18 @@ export const productUpdate = async (req: Request, res: Response) => {
       }
     }
 
+    if (req.body.barcode && req.body.barcode.trim() !== ((existing as any).barcode ?? "")) {
+      const dupeBarcode = await Product.findOne({
+        barcode: req.body.barcode.trim(),
+        _id: { $ne: existing.id || (existing as any)._id },
+      });
+      if (dupeBarcode) {
+        return res
+          .status(409)
+          .json({ message: "Another product with this barcode already exists" });
+      }
+    }
+
     // `category` was previously reassigned with no existence/rule check at all —
     // only validate when it's an actual recategorize, same guard style as
     // categoryUpdate's reparent check.
@@ -394,6 +432,7 @@ export const productUpdate = async (req: Request, res: Response) => {
       where: { id },
       data: {
         code: code ?? existing.code,
+        barcode: req.body.barcode !== undefined ? (req.body.barcode ? String(req.body.barcode).trim() : null) : (existing as any).barcode,
         name: name ?? existing.name,
         description: description !== undefined ? sanitizeRichText(description) : existing.description,
         brand: brand !== undefined ? (brand.trim() || null) : existing.brand,
@@ -928,6 +967,148 @@ export const quickStockUpdate = async (req: Request, res: Response) => {
   } catch (err: any) {
     logger.error("quickStockUpdate error", err);
     res.status(500).json({ message: "Error updating stock", error: err.message });
+  }
+};
+
+// POST /api/products/:id/regenerate-barcode (admin)
+export const regenerateProductBarcode = async (req: Request, res: Response) => {
+  try {
+    const id = String(req.params.id);
+    const existing = await prisma.product.findUnique({ where: { id } });
+    if (!existing) {
+      return res.status(404).json({ message: "Product not found" });
+    }
+
+    const newBarcode = await generateUniqueBarcode();
+    const updated = await prisma.product.update({
+      where: { id },
+      data: { barcode: newBarcode },
+    });
+
+    await createAuditLog({
+      req,
+      action: "UPDATE_PRODUCT",
+      entity: "Product",
+      entityId: id,
+      details: {
+        reason: "REGENERATE_BARCODE",
+        oldBarcode: (existing as any).barcode,
+        newBarcode,
+        productName: existing.name,
+      },
+    });
+
+    return res.status(200).json({
+      message: "Barcode regenerated successfully",
+      barcode: newBarcode,
+      product: updated,
+    });
+  } catch (err: any) {
+    logger.error("regenerateProductBarcode error", err);
+    return res.status(500).json({ message: "Failed to regenerate barcode", error: err.message });
+  }
+};
+
+// GET /api/products/barcode/:barcode (admin/staff POS)
+export const getProductByBarcode = async (req: Request, res: Response) => {
+  try {
+    const rawBarcode = String(req.params.barcode || "").trim();
+    if (!rawBarcode) {
+      return res.status(400).json({ message: "Barcode is required" });
+    }
+
+    const escaped = rawBarcode.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const escapedDash = rawBarcode.replace(/\s+/g, "-").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const escapedSpace = rawBarcode.replace(/-/g, " ").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const regexQuery = {
+      $in: [
+        new RegExp(`^${escaped}$`, "i"),
+        new RegExp(`^${escapedDash}$`, "i"),
+        new RegExp(`^${escapedSpace}$`, "i"),
+      ],
+    };
+
+    // Match either product barcode, code, or name
+    const product = await Product.findOne({
+      $or: [
+        { barcode: regexQuery },
+        { code: regexQuery },
+        { name: regexQuery },
+      ],
+    }).populate("categoryId", "id name");
+
+    if (!product) {
+      // Check if a variant has this barcode or SKU
+      const variant = await ProductVariant.findOne({
+        $or: [
+          { barcode: regexQuery },
+          { sku: regexQuery },
+        ],
+      });
+
+      if (variant) {
+        const parent = await Product.findById(variant.productId).populate("categoryId", "id name");
+        if (parent) {
+          if (!parent.isActive || variant.isActive === false) {
+            return res.status(400).json({
+              message: `Product variant "${parent.name}" is inactive/disabled and cannot be sold.`,
+              isInactive: true,
+              product: {
+                ...parent.toObject(),
+                id: parent._id.toString(),
+              },
+              variant: {
+                ...variant.toObject(),
+                id: variant._id.toString(),
+              },
+            });
+          }
+          return res.status(200).json({
+            product: {
+              ...parent.toObject(),
+              id: parent._id.toString(),
+            },
+            variant: {
+              ...variant.toObject(),
+              id: variant._id.toString(),
+            },
+            matchedType: "variant",
+          });
+        }
+      }
+
+      return res.status(404).json({
+        message: `No product found matching barcode or code "${rawBarcode}".`,
+      });
+    }
+
+    if (!product.isActive) {
+      return res.status(400).json({
+        message: `Product "${product.name}" is inactive or disabled and cannot be sold.`,
+        isInactive: true,
+        product: {
+          ...product.toObject(),
+          id: product._id.toString(),
+        },
+      });
+    }
+
+    const variants = await ProductVariant.find({ productId: product._id, isActive: true });
+
+    return res.status(200).json({
+      product: {
+        ...product.toObject(),
+        id: product._id.toString(),
+      },
+      variants: variants.map((v) => ({
+        ...v.toObject(),
+        id: v._id.toString(),
+      })),
+      matchedType: "product",
+    });
+  } catch (err: any) {
+    logger.error("getProductByBarcode error", err);
+    return res.status(500).json({ message: "Error fetching product by barcode", error: err.message });
   }
 };
 

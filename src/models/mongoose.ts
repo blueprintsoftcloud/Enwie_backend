@@ -183,6 +183,7 @@ export interface IProductCustomSection {
 
 export interface IProduct extends Document {
   code: string;
+  barcode?: string;
   name: string;
   description?: string;
   brand?: string;
@@ -212,6 +213,7 @@ export interface IProduct extends Document {
 const ProductSchema = new Schema<IProduct>(
   {
     code: { type: String, required: true },
+    barcode: { type: String, sparse: true },
     name: { type: String, required: true },
     description: String,
     brand: String,
@@ -254,6 +256,7 @@ const ProductSchema = new Schema<IProduct>(
   { timestamps: true }
 );
 ProductSchema.index({ code: 1 }, { unique: true });
+ProductSchema.index({ barcode: 1 }, { unique: true, sparse: true });
 // Compound indexes reflecting actual query patterns (see product.controller.ts and
 // product-user.controller.ts).
 ProductSchema.index({ categoryId: 1 });
@@ -379,6 +382,7 @@ export interface IProductVariant extends Document {
    * field because Mongo can't uniquely index a Mixed map by content on its own. */
   optionsKey: string;
   sku?: string;
+  barcode?: string;
   stock: number;
   /** Falls back to Product.price when null — most variants don't need a price
    * different from the base product, only a stock count of their own. */
@@ -412,6 +416,7 @@ const ProductVariantSchema = new Schema<IProductVariant>(
     options: { type: Schema.Types.Mixed, default: {} },
     optionsKey: { type: String, required: true },
     sku: String,
+    barcode: { type: String, sparse: true },
     stock: { type: Number, default: 0 },
     priceOverride: { type: Number, default: null },
     purchasePriceOverride: { type: Number, default: null },
