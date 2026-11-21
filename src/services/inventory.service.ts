@@ -10,7 +10,7 @@
 // order.controller.ts — it must remain an atomic "reject the order if insufficient stock"
 // check in the request path, which async processing (with its inherent delay) would break.
 
-import { Product, ProductVariant, Order } from "../models/mongoose";
+import { Product, ProductVariant, Order, Coupon } from "../models/mongoose";
 import { env } from "../config/env";
 import { sendNotification } from "./notification.service";
 import { getAdminAndStaffRecipients } from "../utils/notificationRecipients";
@@ -39,6 +39,19 @@ const restoreStockNow = async (data: RestoreStockJobData) => {
   if (!claimed) {
     logger.info(`[inventory] restore-stock for order ${data.orderId} already applied — skipping (idempotent)`);
     return;
+  }
+
+  // Restore coupon usage count if a coupon was redeemed on this order
+  if (claimed.couponId) {
+    try {
+      await Coupon.updateOne(
+        { _id: claimed.couponId, usedCount: { $gt: 0 } },
+        { $inc: { usedCount: -1 } }
+      );
+      logger.info(`[inventory] Restored coupon ${claimed.couponId} usage for cancelled order ${data.orderId}`);
+    } catch (couponErr) {
+      logger.error(`[inventory] Failed to restore coupon usage for order ${data.orderId}`, couponErr);
+    }
   }
 
   for (const item of data.items) {

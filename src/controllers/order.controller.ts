@@ -2415,7 +2415,7 @@ export const getProductsForAdminOrder = async (req: Request, res: Response) => {
       prisma.product.findMany({
         where,
         select: {
-          id: true, name: true, code: true, barcode: true, image: true, description: true, price: true, stock: true,
+          id: true, name: true, code: true, barcode: true, image: true, description: true, price: true, discount: true, stock: true,
           category: { select: { id: true, name: true } },
         },
         orderBy: { name: "asc" },
@@ -2656,7 +2656,7 @@ export const placeAdminOrder = async (req: Request, res: Response) => {
     const productIds = items.map((i: any) => i.productId);
     const products = await prisma.product.findMany({
       where: { id: { in: productIds }, isActive: true },
-      select: { id: true, name: true, price: true, stock: true },
+      select: { id: true, name: true, price: true, discount: true, stock: true },
     });
 
     const productMap = Object.fromEntries(products.map((p: any) => [p.id, p]));
